@@ -1,2 +1,0 @@
-# CycleOfLife
-Projet PPC

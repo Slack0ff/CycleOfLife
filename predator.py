@@ -1,72 +1,82 @@
 import time, socket, sys, subprocess, os
 from multiprocessing.managers import BaseManager
 
+# Configuration réseau
 HOST, MGR_PORT, SOCK_PORT, AUTH_KEY = '127.0.0.1', 50000, 6666, b'circleoflife'
 
+# Paramètres de simulation (Équilibrés pour la survie)
 TICK = 0.5
-DECAY = 1.5     
-H_THRESHOLD = 70 # Seuil pour chasser
-R_THRESHOLD = 90 # Seuil pour se reproduire
+DECAY = 0.8 # Vitesse de perte d'énergie
+H_THRESHOLD = 60 
+R_THRESHOLD = 90 # Seuil d'énergie déclenchant la reproduction
 
 class SimulationManager(BaseManager): pass
 
 class PredatorProcess:
     def __init__(self):
         self.energy = 80
-        # Connexion au Manager pour voir les stats globales
+        
+        # 1. Connexion au Gestionnaire de Mémoire Partagée (pour lire l'état global si besoin)
         SimulationManager.register('get_state')
         self.mgr = SimulationManager(address=(HOST, MGR_PORT), authkey=AUTH_KEY)
+        
         try:
             self.mgr.connect()
             self.shared_state = self.mgr.get_state()
             
-            # Connexion Socket pour les actions (HUNT, DIE)
+            # 2. Connexion au Socket (pour les actions critiques : Chasser, Mourir)
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.sock.connect((HOST, SOCK_PORT))
             self.sock.sendall(b"JOIN PRED")
-            # On reçoit l'ID (optionnel ici)
-            self.sock.recv(4)
-        except Exception as e:
-            # Si l'env est fermé, on se tue par PID
+            self.sock.recv(4) # Attente de l'accusé de réception (ID)
+        except Exception:
+            # Si l'environnement n'est pas dispo, on termine immédiatement
             os.kill(os.getpid(), 9)
 
     def run(self):
-        while self.energy > 0:
-            time.sleep(TICK)
-            self.energy -= DECAY
+        try:
+            while self.energy > 0:
+                time.sleep(TICK)
+                self.energy -= DECAY
 
-            # 1. LOGIQUE DE CHASSE
-            if self.energy < H_THRESHOLD:
-                # On demande à l'environnement de chasser une proie active
-                    self.sock.sendall(b"ACTION HUNT")
-                    # Ici on simule un gain d'énergie fixe si on a tenté de chasser
+                # --- COMPORTEMENT : CHASSE ---
+                # Si l'énergie est basse, on envoie une requête de chasse à l'Env
+                if self.energy < H_THRESHOLD:
                     try:
+                        self.sock.sendall(b"ACTION HUNT")
+                        
+                        # On attend la réponse de l'Env pour savoir si on a mangé
                         self.sock.setblocking(True)
                         rep = self.sock.recv(1024)
+                        
                         if b"EAT_OK" in rep:
-                            self.energy += 50
+                            self.energy += 40 # Gain d'énergie en cas de succès
+                            
                         self.sock.setblocking(False)
                     except: pass
 
-            # 2. REPRODUCTION
-            if self.energy > R_THRESHOLD:
-                self.energy -= 50
-                # On lance un nouveau processus prédateur
-                subprocess.Popen([sys.executable, "predator.py"])
+                # --- COMPORTEMENT : REPRODUCTION ---
+                # Si l'énergie est suffisante, on crée un nouveau processus
+                if self.energy > R_THRESHOLD:
+                    self.energy -= 50
+                    subprocess.Popen([sys.executable, "predator.py"])
 
-            if self.energy > 100:
-                self.energy = 100
+                # Plafond d'énergie
+                if self.energy > 100:
+                    self.energy = 100
 
-        # 3. MORT PAR FAMINE
-        self.die_starvation()
+            # --- FIN DE VIE ---
+            self.die_starvation()
+            
+        except KeyboardInterrupt:
+            self.die_starvation()
 
     def die_starvation(self):
+        """Notifie l'environnement de la mort et ferme les ressources."""
         try:
             self.sock.sendall(b"DIE PRED")
             self.sock.close()
-        except:
-            pass
-        # Kill final via PID 
+        except: pass
         os.kill(os.getpid(), 9)
 
 if __name__ == "__main__":
